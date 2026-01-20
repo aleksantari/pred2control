@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn 
 import torch.nn.functional as F
-
+import math
 import numpy as np
 
 
@@ -203,13 +203,13 @@ def init_weights(module: nn.Module):
 
 
 class MotorFlow(nn.Module):
-    def __init__(self, embed_dim=128, time_dim=64, n_layer=4, n_head=4, dropout=0.0, traj_size=30):
+    def __init__(self, embed_dim=128, time_dim=64, n_layer=4, n_head=4, dropout=0.0, traj_size=150):
         super().__init__()
 
         self.action_in = nn.Linear(6, embed_dim)
         self.action_out = nn.Linear(embed_dim, 6)
 
-        self.context_pos_emb = nn.Embedding(traj_size -1, embed_dim)
+        self.context_pos_emb = nn.Embedding(traj_size, embed_dim)
         self.time_embed = SinusoidalTimeEmbedding(time_dim)
         self.time_mlp = TimeMLP(time_dim, embed_dim)
 
