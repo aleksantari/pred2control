@@ -23,10 +23,13 @@ class SelfAttentionHead(nn.Module):
         self.key = nn.Linear(embed_dim, head_dim, bias=False)
         self.query = nn.Linear(embed_dim, head_dim, bias=False)
         self.value = nn.Linear(embed_dim, head_dim, bias=False)
+
         mask = torch.tril(torch.ones(traj_size, traj_size)).view(1, traj_size, traj_size)
+        self.register_buffer("mask", mask)
+
         self.atten_drop = nn.Dropout(dropout)
         self.resid_drop = nn.Dropout(dropout)
-        self.register_buffer("mask", mask)
+        
 
     def forward(self, x):
         B, T, C = x.shape
@@ -46,6 +49,7 @@ class SelfAttentionHead(nn.Module):
         return out
     
 
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, num_heads, embed_dim, head_dim, traj_size, dropout=0.0):
         super().__init__()
@@ -62,6 +66,7 @@ class MultiHeadAttention(nn.Module):
         return out
     
 
+
 class FeedForward(nn.Module):
     def __init__(self, embed_dim, expansion=4, dropout=0.0):
         super().__init__()
@@ -71,7 +76,10 @@ class FeedForward(nn.Module):
             nn.Linear(expansion*embed_dim, embed_dim),
             nn.Dropout(dropout),
         )
+
     def forward(self, x): return self.net(x)
+
+
 
 class Block(nn.Module):
     def __init__(self, embed_dim, n_head, block_size, mlp_expansion=4, dropout=0.0):
@@ -95,7 +103,7 @@ class Block(nn.Module):
 
 
 class MotorGPT(nn.Module):
-    def __init__(self, action_size=6, embed_dim=192, traj_size=128, n_layer=4, n_head=4, dropout=0.0):
+    def __init__(self, action_size=6, embed_dim=192, traj_size=150, n_layer=4, n_head=4, dropout=0.0):
         super().__init__()
         self.action_size = action_size
         self.traj_size = traj_size
@@ -116,7 +124,6 @@ class MotorGPT(nn.Module):
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
-        # NanoGPT init is fine conceptually, but add LayerNorm explicitly
         if isinstance(m, nn.Linear):
             nn.init.normal_(m.weight, mean=0.0, std=0.02)
             if m.bias is not None:
@@ -161,7 +168,7 @@ class MotorGPT(nn.Module):
         return pred, loss
 
     @torch.no_grad()
-    def generate(self, seed_actions, max_new_steps=100, noise_std=0.0):
+    def generate(self, seed_actions, max_new_steps=150, noise_std=0.0):
         """
         seed_actions: (B, T0, A) normalized actions
         returns:      (B, T0+max_new_steps, A) normalized actions

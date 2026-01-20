@@ -1,9 +1,4 @@
-"""
-motor_gpt package
-
-Torch-side code for:
-- loading processed episode data
-- sampling fixed-length training windows (episode-respecting)
-- Motor-GPT model definition
-- training utilities
-"""
+from .model import MotorGPT
+from .train import train_motorgpt, eval_teacher_forced_last_rmse
+from .data import sample_batch_motorgpt
+from .config import TrainConfig

@@ -1,12 +1,21 @@
-"""
-data.py (Torch env)
+import numpy as np
+import torch
 
-Dataset utilities for Motor-GPT:
-- load episode-grouped action tensors from `*.pt`
-- split episodes into train/val/test (by episode, no leakage)
-- ActionSequenceDataset: samples random windows within episodes (no boundary crossing)
 
-Yields:
-  x: (B, T, 6) actions
-  y: (B, T, 6) next-action targets (shifted by 1)
-"""
+def sample_batch_motorgpt(episodes, batch_size, L=150, T=300):
+    """
+    episodes: list of (T,6) tensors (already normalized)
+    returns X,Y each (B,L,6) where Y is shifted by 1
+    """
+    B = batch_size
+    X = torch.empty(B, L, 6, dtype=torch.float32)
+    Y = torch.empty(B, L, 6, dtype=torch.float32)
+
+    max_s = T - (L + 1)
+
+    for b in range(B):
+        ep = episodes[np.random.randint(0, len(episodes))]
+        s = np.random.randint(0, max_s + 1)
+        X[b] = ep[s : s + L]
+        Y[b] = ep[s + 1 : s + L + 1]
+    return X, Y

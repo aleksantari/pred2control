@@ -27,6 +27,8 @@ class SinusoidalTimeEmbedding(nn.Module):
             emb = F.pad(emb, (0, 1))
         return emb
 
+
+
 class TimeMLP(nn.Module):
     def __init__(self, time_dim: int, out_dim: int):
         super().__init__()
@@ -144,7 +146,8 @@ class FeedForward(nn.Module):
             nn.Linear(expansion*embed_dim, embed_dim),
             nn.Dropout(dropout),
         )
-    def forward(self, x): return self.net(x)
+    def forward(self, x): 
+        return self.net(x)
 
 
 # Transformer Block with Self-Attention, Cross-Attention, and Feed-Forward Network
@@ -247,77 +250,5 @@ class MotorFlow(nn.Module):
         return out
 
 
-class RectifiedFlowScheduler:
-    def __init__(self, eps: float = 1e-5):
-        self.eps = eps
-
-    # sample time for the batch
-    # t: (B,)
-    def sample_t(self, batch_size:int, device):
-        # avoiding exactly 0 or 1
-        t = torch.rand(batch_size, device=device) * (1 - 2*self.eps) + self.eps
-        return t
-    
-    #sample noise for the batch
-    # noise: (B, 6)
-    def sample_noise(self, shape, device):
-        noise = torch.randn(shape, device=device)
-        return noise
-    
-    # target vector field
-    # xt: (B, 6)
-    def bridge(self, x0, noise, t):
-        # x0, z: (B, 6) or (B, K, 6) later
-        # t: (B,) 
-        while t.dim() < x0.dim():
-            t = t.unsqueeze(1)
-        xt = (1-t) * x0 +t * noise
-        return xt
-    
-    def target_velocity(self, x0, noise):
-        return noise - x0
-    
 
 
-
-def train_step(model, scheduler, batch, optimizer):
-    x0, past_actions = batch  # x0 is next action
-    B = x0.shape[0]
-    device = x0.device
-
-    t = scheduler.sample_t(B, device=device)           # (B,)
-    z = scheduler.sample_noise(x0.shape, device=device) # (B,6)
-    xt = scheduler.bridge(x0, z, t)                    # (B,6)
-    v_target = scheduler.target_velocity(x0, z)        # (B,6)
-
-    v_pred = model(a_noisy=xt, t=t, past_actions=past_actions)  # (B,6)
-
-    loss = torch.mean((v_pred - v_target) ** 2)
-
-    optimizer.zero_grad(set_to_none=True)
-    loss.backward()
-    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # optional but helpful
-    optimizer.step()
-
-    return loss.item()
-
-
-
-@torch.no_grad()
-def sample_action(model, past_actions, n_steps=10):
-    # past_actions: (B,T,6) normalized
-    B = past_actions.shape[0]
-    device = past_actions.device
-
-    x = torch.randn(B, 6, device=device)  # start at noise (t=1)
-
-    # time grid from 1 -> 0
-    ts = torch.linspace(1.0, 0.0, n_steps, device=device)
-
-    for i in range(n_steps - 1):
-        t = ts[i].repeat(B)               # (B,)
-        dt = ts[i+1] - ts[i]              # negative
-        v = model(a_noisy=x, t=t, past_actions=past_actions)  # (B,6)
-        x = x + dt * v                    # Euler step
-
-    return x  # normalized action prediction (B,6)
