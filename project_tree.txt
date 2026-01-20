@@ -1,0 +1,52 @@
+.
+├── data
+│   ├── pred2control_target.pt
+│   └── prepared.pt
+├── Homework7.ipynb
+├── models
+│   ├── __init__.py
+│   ├── motor_flow
+│   │   ├── config.py
+│   │   ├── data.py
+│   │   ├── __init__.py
+│   │   ├── model.py
+│   │   ├── __pycache__
+│   │   │   ├── config.cpython-311.pyc
+│   │   │   ├── data.cpython-311.pyc
+│   │   │   ├── __init__.cpython-311.pyc
+│   │   │   ├── model.cpython-311.pyc
+│   │   │   └── train.cpython-311.pyc
+│   │   └── train.py
+│   ├── motor_gpt
+│   │   ├── config.py
+│   │   ├── data.py
+│   │   ├── __init__.py
+│   │   ├── model.py
+│   │   ├── __pycache__
+│   │   │   ├── config.cpython-311.pyc
+│   │   │   ├── data.cpython-311.pyc
+│   │   │   ├── __init__.cpython-311.pyc
+│   │   │   ├── model.cpython-311.pyc
+│   │   │   └── train.cpython-311.pyc
+│   │   └── train.py
+│   └── __pycache__
+│       └── __init__.cpython-311.pyc
+├── notebooks
+│   ├── batching.ipynb
+│   ├── dataset.ipynb
+│   ├── motor_flow_chunk.dev.ipynb
+│   ├── motor_flow.dev.ipynb
+│   ├── motor_flow_stage5_best.pt
+│   ├── motor_gpt_dev.ipynb
+│   └── motor_gpt_stage2_best.pt
+├── project_tree.txt
+├── README.md
+└── scripts
+    ├── __init__.py
+    ├── prepare_data.py
+    ├── __pycache__
+    │   ├── __init__.cpython-311.pyc
+    │   └── run_train.cpython-311.pyc
+    └── run_train.py
+
+10 directories, 39 files
