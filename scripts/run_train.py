@@ -4,7 +4,7 @@ import torch
 
 
 
-PREPARED_PATH = "data/prepared.pt"  #
+PREPARED_PATH = "data/prepared.pt"  
 
 def main():
     payload = torch.load(PREPARED_PATH, map_location="cpu")
@@ -26,6 +26,8 @@ def main():
         eval_every=500,
         device="cuda" if torch.cuda.is_available() else "cpu"
     )
+
+    
     model = MotorGPT(traj_size=cfg.L).to(cfg.device)   # should match cfg.L
 
     print("cfg.L =", cfg.L)
