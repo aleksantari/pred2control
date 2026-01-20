@@ -1,0 +1,323 @@
+import torch
+import torch.nn as nn 
+import torch.nn.functional as F
+
+import numpy as np
+
+
+
+class SinusoidalTimeEmbedding(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        t: (B,) float in [0,1] or (B,) int steps cast to float
+        returns: (B, dim)
+        """
+        half = self.dim // 2
+        freqs = torch.exp(
+            -math.log(10000) * torch.arange(0, half, device=t.device).float() / (half - 1)
+        )
+        # (B, half)
+        args = t[:, None] * freqs[None, :]
+        emb = torch.cat([torch.sin(args), torch.cos(args)], dim=-1)
+        if self.dim % 2 == 1:
+            emb = F.pad(emb, (0, 1))
+        return emb
+
+class TimeMLP(nn.Module):
+    def __init__(self, time_dim: int, out_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(time_dim, out_dim),
+            nn.SiLU(),
+            nn.Linear(out_dim, out_dim),
+        )
+
+    def forward(self, t_emb: torch.Tensor) -> torch.Tensor:
+        return self.net(t_emb)
+
+
+
+class AdaRMSNorm(nn.Module):
+    def __init__(self, dim: int, cond_dim: int, eps: float = 1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.to_scale = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(cond_dim, dim, bias=True),
+        )
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """
+        x: (B, T, D)
+        cond: (B, cond_dim)
+        """
+        rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+        x_norm = x / rms
+        scale = self.to_scale(cond).unsqueeze(1)  # (B, 1, D)
+        return x_norm * (self.weight + scale)
+    
+
+
+
+class AttentionHead(nn.Module):
+    """ Single Attention Head: for Self-Attention or Cross-Attention
+    Args:
+        head_dim: dimension of each attention head
+        embed_dim: input embedding dimension
+        dropout: dropout rate
+        causal: whether to apply causal masking
+        max_len: maximum sequence (context) length (required if causal is True) 
+      
+    Returns:
+        out: output tensor after attention (B, Tq, head_dim)
+    
+     """
+    def __init__(self, head_dim, embed_dim, dropout=0.0, causal=False, max_len=None):
+        super().__init__()
+        self.key = nn.Linear(embed_dim, head_dim, bias=False)
+        self.query = nn.Linear(embed_dim, head_dim, bias=False)
+        self.value = nn.Linear(embed_dim, head_dim, bias=False)
+        self.atten_drop = nn.Dropout(dropout)
+        self.resid_drop = nn.Dropout(dropout)
+
+        self.causal = causal
+        if causal:
+            assert max_len is not None, "max_len required for causal mask"
+            mask = torch.tril(torch.ones(max_len, max_len)).view(1, max_len, max_len)
+            self.register_buffer("mask", mask)
+
+    def forward(self, x_q, x_kv=None):
+        # x_q: (B, Tq, E), x_kv: (B, Tk, E)
+        if x_kv is None:
+            x_kv = x_q
+
+        B, Tq, _ = x_q.shape
+        Tk = x_kv.shape[1]
+
+        q = self.query(x_q)
+        k = self.key(x_kv)
+        v = self.value(x_kv)
+
+        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+
+        if self.causal:
+            att = att.masked_fill(self.mask[:, :Tq, :Tk] == 0, float("-inf"))
+
+        att = F.softmax(att, dim=-1)
+        att = self.atten_drop(att)
+
+        out = att @ v
+        out = self.resid_drop(out)
+        return out
+    
+
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, num_heads, embed_dim, head_dim, dropout=0.0, causal=False, max_len=None):
+        super().__init__()
+        self.heads = nn.ModuleList([AttentionHead(head_dim, embed_dim, dropout, causal, max_len) for _ in range(num_heads)])
+        self.proj = nn.Linear(num_heads * head_dim, embed_dim, bias=False)
+        self.drop = nn.Dropout(dropout)
+
+    def forward(self, x, x_kv=None):
+        multi_head_out = [h(x, x_kv) for h in self.heads]  # list of (B, T, head_size)
+        multi_head_concat = torch.cat(multi_head_out, dim=-1) # (B, T, num_heads * head_size)
+        out = self.drop(self.proj(multi_head_concat))  # (B, T, embed_dim)
+        
+        return out
+    
+
+
+
+class FeedForward(nn.Module):
+    def __init__(self, embed_dim, expansion=4, dropout=0.0):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(embed_dim, expansion*embed_dim),
+            nn.GELU(),
+            nn.Linear(expansion*embed_dim, embed_dim),
+            nn.Dropout(dropout),
+        )
+    def forward(self, x): return self.net(x)
+
+
+# Transformer Block with Self-Attention, Cross-Attention, and Feed-Forward Network
+class Block(nn.Module):
+    def __init__(self, embed_dim, n_head, t_cond, mlp_expansion=4, dropout=0.0):
+        super().__init__()
+        assert embed_dim % n_head == 0
+        head_size = embed_dim // n_head
+
+        self.ada_norm1 = AdaRMSNorm(embed_dim, t_cond)
+        self.ada_norm2 = AdaRMSNorm(embed_dim, t_cond)
+        self.ada_norm3 = AdaRMSNorm(embed_dim, t_cond)
+        self.rms_norm = nn.RMSNorm(embed_dim)
+
+        self.self_attn = MultiHeadAttention(n_head, embed_dim, head_size, dropout)
+        self.cross_attn = MultiHeadAttention(n_head, embed_dim, head_size, dropout)
+        self.mlp = FeedForward(embed_dim, expansion=mlp_expansion, dropout=dropout)
+
+    def forward(self, t_cond, x, x_kv=None):
+      
+        x = x + self.self_attn(self.ada_norm1(x, t_cond))
+        x = x + self.cross_attn(self.ada_norm2(x, t_cond), self.rms_norm(x_kv))
+        x = x + self.mlp(self.ada_norm3(x, t_cond))
+        return x
+    
+
+
+
+def init_weights(module: nn.Module):
+    if isinstance(module, nn.Linear):
+        nn.init.normal_(module.weight, mean=0.0, std=0.02)
+        if module.bias is not None:
+            nn.init.zeros_(module.bias)
+    elif isinstance(module, nn.Embedding):
+        nn.init.normal_(module.weight, mean=0.0, std=0.02)
+    elif isinstance(module, nn.LayerNorm):
+        nn.init.ones_(module.weight)
+        nn.init.zeros_(module.bias)
+
+    if module.__class__.__name__ in ["RMSNorm", "AdaRMSNorm"]:
+        if hasattr(module, "weight"):
+            nn.init.ones_(module.weight)
+
+    if module.__class__.__name__ == "AdaRMSNorm":
+        last = module.to_scale[-1]
+        if isinstance(last, nn.Linear):
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
+    # only for TimeMLP
+    if isinstance(module, TimeMLP):
+        last = module.net[-1]
+        if isinstance(last, nn.Linear):
+            nn.init.zeros_(last.weight)
+            nn.init.zeros_(last.bias)
+
+
+class MotorFlow(nn.Module):
+    def __init__(self, embed_dim=128, time_dim=64, n_layer=4, n_head=4, dropout=0.0, traj_size=30):
+        super().__init__()
+
+        self.action_in = nn.Linear(6, embed_dim)
+        self.action_out = nn.Linear(embed_dim, 6)
+
+        self.context_pos_emb = nn.Embedding(traj_size -1, embed_dim)
+        self.time_embed = SinusoidalTimeEmbedding(time_dim)
+        self.time_mlp = TimeMLP(time_dim, embed_dim)
+
+        self.blocks = nn.ModuleList([
+            Block(embed_dim, n_head, embed_dim, dropout=dropout)
+            for _ in range(n_layer)
+        ])
+
+        self.norm = nn.RMSNorm(embed_dim)
+
+        self.apply(init_weights)
+
+    def forward(self, a_noisy: torch.Tensor, t: torch.Tensor, past_actions: torch.Tensor) -> torch.Tensor:
+        """
+        a_noisy: (B, 6)          # single noisy action OR (B,K,6) later
+        t: (B,)                  # flow time
+        past_actions: (B, T, 6)  # context
+        """
+        t_cond = self.time_mlp(self.time_embed(t))
+
+        x = self.action_in(a_noisy).unsqueeze(1)
+
+        B, T, _ = past_actions.shape
+        pos = self.context_pos_emb(torch.arange(T, device=past_actions.device)).unsqueeze(0)
+        context = self.action_in(past_actions) + pos
+
+        for blk in self.blocks:
+            x = blk(t_cond, x, context)
+
+        x = self.norm(x)
+        x = self.action_out(x)
+
+        out = x.squeeze(1)
+
+        return out
+
+
+class RectifiedFlowScheduler:
+    def __init__(self, eps: float = 1e-5):
+        self.eps = eps
+
+    # sample time for the batch
+    # t: (B,)
+    def sample_t(self, batch_size:int, device):
+        # avoiding exactly 0 or 1
+        t = torch.rand(batch_size, device=device) * (1 - 2*self.eps) + self.eps
+        return t
+    
+    #sample noise for the batch
+    # noise: (B, 6)
+    def sample_noise(self, shape, device):
+        noise = torch.randn(shape, device=device)
+        return noise
+    
+    # target vector field
+    # xt: (B, 6)
+    def bridge(self, x0, noise, t):
+        # x0, z: (B, 6) or (B, K, 6) later
+        # t: (B,) 
+        while t.dim() < x0.dim():
+            t = t.unsqueeze(1)
+        xt = (1-t) * x0 +t * noise
+        return xt
+    
+    def target_velocity(self, x0, noise):
+        return noise - x0
+    
+
+
+
+def train_step(model, scheduler, batch, optimizer):
+    x0, past_actions = batch  # x0 is next action
+    B = x0.shape[0]
+    device = x0.device
+
+    t = scheduler.sample_t(B, device=device)           # (B,)
+    z = scheduler.sample_noise(x0.shape, device=device) # (B,6)
+    xt = scheduler.bridge(x0, z, t)                    # (B,6)
+    v_target = scheduler.target_velocity(x0, z)        # (B,6)
+
+    v_pred = model(a_noisy=xt, t=t, past_actions=past_actions)  # (B,6)
+
+    loss = torch.mean((v_pred - v_target) ** 2)
+
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)  # optional but helpful
+    optimizer.step()
+
+    return loss.item()
+
+
+
+@torch.no_grad()
+def sample_action(model, past_actions, n_steps=10):
+    # past_actions: (B,T,6) normalized
+    B = past_actions.shape[0]
+    device = past_actions.device
+
+    x = torch.randn(B, 6, device=device)  # start at noise (t=1)
+
+    # time grid from 1 -> 0
+    ts = torch.linspace(1.0, 0.0, n_steps, device=device)
+
+    for i in range(n_steps - 1):
+        t = ts[i].repeat(B)               # (B,)
+        dt = ts[i+1] - ts[i]              # negative
+        v = model(a_noisy=x, t=t, past_actions=past_actions)  # (B,6)
+        x = x + dt * v                    # Euler step
+
+    return x  # normalized action prediction (B,6)
