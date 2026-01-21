@@ -20,7 +20,7 @@ def main():
         L = 150,
         max_steps=10000,
         batch_size=64,
-        eval_every=500,
+        eval_every=250,
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
 
