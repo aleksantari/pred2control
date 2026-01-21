@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from .data import sample_batch_motorgpt
+from .data import sample_batch_motorgpt, make_fixed_rollout_valset
 from .config import TrainConfig, set_seed
 
 
@@ -28,6 +28,31 @@ def eval_teacher_forced_last_rmse(model, episodes, L=150, num_batches=200, batch
     return (sqerr_sum / count) ** 0.5
 
 
+
+
+@torch.no_grad()
+def rollout_suffix_rmse_stage2(model, fixed_valset, H=100, device="cuda"):
+    model.eval()
+    sqerr_sum = 0.0
+    count = 0
+
+    for seed_prefix, gt_suffix in fixed_valset:
+        seed_prefix = seed_prefix.unsqueeze(0).to(device)  # (1,L,6)
+        gt_suffix   = gt_suffix.to(device)                 # (H,6)
+
+        out = model.generate(seed_prefix, max_new_steps=H) # (1,L+H,6)
+        pred_suffix = out[0, -H:, :]                       # (H,6)
+
+        e = pred_suffix - gt_suffix
+        sqerr_sum += (e * e).sum().item()
+        count += e.numel()
+
+    rmse = (sqerr_sum / count) ** 0.5
+    return rmse
+
+
+
+
 def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, float]:
     set_seed(cfg.seed)
     model = model.to(cfg.device)
@@ -36,6 +61,11 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     best_test_rmse = float("inf")
+
+    # for roll out eval
+    fixed_valset = make_fixed_rollout_valset(test_eps, num_eps=16, L=cfg.L, H=100, seed=123)
+
+
 
     for step in range(1, cfg.max_steps + 1):
         X, Y = sample_batch_motorgpt(train_eps, batch_size=cfg.batch_size, L=cfg.L)
@@ -71,5 +101,12 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
                 ckpt = {"model_state": model.state_dict(), "config": cfg.__dict__, "best_test_rmse": best_test_rmse}
                 torch.save(ckpt, "motor_gpt_best.pt")
                 print(f"   saved: motor_gpt_best.pt (best_test_rmse={best_test_rmse:.6f})")
+
+            # roll out eval
+            roll_rmse = rollout_suffix_rmse_stage2(model, fixed_valset, H=100, device=cfg.device)
+            print(f"== rollout_suffix_RMSE@H=100 {roll_rmse:.6f}")
+
+            
+
 
     return {"best_test_rmse": best_test_rmse}

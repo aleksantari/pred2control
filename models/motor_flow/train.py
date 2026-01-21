@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .data import sample_batch_motorflow
+from .data import sample_batch_motorflow, make_fixed_rollout_valset
 from .config import FlowTrainConfig, set_seed
 
 
@@ -91,6 +91,57 @@ def eval_motorflow_teacher_forced_rmse(model, episodes, cfg: FlowTrainConfig, nu
     return (sqerr_sum / count) ** 0.5
 
 
+@torch.no_grad()
+def rollout_stage5(model, seed_prefix, L=150, H=100, n_steps_sampler=10):
+    """
+    seed_prefix: (1,L,6) normalized
+    returns: (1,L+H,6)
+    """
+    model.eval()
+    out = seed_prefix
+
+    for _ in range(H):
+        past = out[:, -L:, :]                         # (1,L,6)
+        next_a = sample_action(model, past, n_steps=n_steps_sampler)  # (1,6)
+        out = torch.cat([out, next_a.unsqueeze(1)], dim=1)            # append (1,1,6)
+    return out
+
+@torch.no_grad()
+def rollout_suffix_rmse_stage5(model, fixed_valset, L=150, H=100, M=8, n_steps_sampler=10, device="cuda"):
+    """
+    Returns:
+      mean_rmse over M rollouts + best_rmse (oracle) over M rollouts
+    """
+    model.eval()
+    rmses = []
+    best_rmses = []
+
+    for seed_prefix, gt_suffix in fixed_valset:
+        seed_prefix = seed_prefix.unsqueeze(0).to(device)  # (1,L,6)
+        gt_suffix   = gt_suffix.to(device)                 # (H,6)
+
+        # run M stochastic rollouts
+        errs = []
+        for _ in range(M):
+            out = rollout_stage5(model, seed_prefix, L=L, H=H, n_steps_sampler=n_steps_sampler)
+            pred_suffix = out[0, -H:, :]                    # (H,6)
+            e = pred_suffix - gt_suffix
+            errs.append((e * e).mean().item())              # MSE scalar
+
+        # mean RMSE across rollouts
+        mean_rmse = (sum(errs) / len(errs)) ** 0.5
+        # best-of-M RMSE (oracle)
+        best_rmse = (min(errs)) ** 0.5
+
+        rmses.append(mean_rmse)
+        best_rmses.append(best_rmse)
+
+    return float(sum(rmses)/len(rmses)), float(sum(best_rmses)/len(best_rmses))
+
+
+
+
+
 
 def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
     set_seed(cfg.seed)
@@ -101,6 +152,10 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
     opt = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
     best_test_rmse = float("inf")
+
+    # rollout eval
+    fixed_valset = make_fixed_rollout_valset(test_eps, num_eps=16, L=cfg.L, H=100, seed=123)
+
 
     for step in range(1, cfg.max_steps + 1):
         x0, past = sample_batch_motorflow(train_eps, batch_size=cfg.batch_size, L=cfg.L)
@@ -133,5 +188,13 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
                 ckpt = {"model_state": model.state_dict(), "config": cfg.__dict__, "best_test_rmse": best_test_rmse}
                 torch.save(ckpt, "motor_flow_best.pt")
                 print(f"   saved: motor_flow_best.pt (best_test_rmse={best_test_rmse:.6f})")
+
+
+            # rollout eval
+            mean_rmse, best_rmse = rollout_suffix_rmse_stage5(
+                model, fixed_valset, L=cfg.L, H=100, M=8, n_steps_sampler=cfg.n_steps_sample_eval, device=cfg.device
+                )
+            print(f"== rollout_suffix_RMSE@H=100 mean {mean_rmse:.6f} | bestof8 {best_rmse:.6f}")
+
 
     return {"best_test_rmse": best_test_rmse}

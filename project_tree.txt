@@ -10,27 +10,16 @@
 │   │   ├── data.py
 │   │   ├── __init__.py
 │   │   ├── model.py
-│   │   ├── __pycache__
-│   │   │   ├── config.cpython-311.pyc
-│   │   │   ├── data.cpython-311.pyc
-│   │   │   ├── __init__.cpython-311.pyc
-│   │   │   ├── model.cpython-311.pyc
-│   │   │   └── train.cpython-311.pyc
 │   │   └── train.py
 │   ├── motor_gpt
 │   │   ├── config.py
 │   │   ├── data.py
 │   │   ├── __init__.py
 │   │   ├── model.py
-│   │   ├── __pycache__
-│   │   │   ├── config.cpython-311.pyc
-│   │   │   ├── data.cpython-311.pyc
-│   │   │   ├── __init__.cpython-311.pyc
-│   │   │   ├── model.cpython-311.pyc
-│   │   │   └── train.cpython-311.pyc
 │   │   └── train.py
-│   └── __pycache__
-│       └── __init__.cpython-311.pyc
+
+├── motor_flow_best.pt
+├── motor_gpt_best.pt
 ├── notebooks
 │   ├── batching.ipynb
 │   ├── dataset.ipynb
@@ -44,9 +33,7 @@
 └── scripts
     ├── __init__.py
     ├── prepare_data.py
-    ├── __pycache__
-    │   ├── __init__.cpython-311.pyc
-    │   └── run_train.cpython-311.pyc
-    └── run_train.py
+    ├── train_motorflow.py
+    └── train_motorgpt.py
 
-10 directories, 39 files
+
