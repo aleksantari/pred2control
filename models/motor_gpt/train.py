@@ -104,7 +104,7 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
                 last_loss = F.mse_loss(pred[:, -1, :], Y[:, -1, :]).item()
                 full_loss = F.mse_loss(pred, Y).item()
 
-            # log lightweight training metrics (every step 10 steps)
+            # log lightweight training metrics (every 10 steps)
             if use_wandb and (step % 10 == 0):
                 wandb.log(
                     {
@@ -113,10 +113,11 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
                         "train/last_mse": float(last_loss),
                         "grad/clip_norm": float(clip_norm),
                         "optim/lr": float(opt.param_groups[0]["lr"]),
-                    }
+                    },
+                    step=step,
                 )
 
-            if step % 50 == 0:
+            if step % 25 == 0:
                 print(
                     f"step {step:6d} | train_full {full_loss:.6f} | train_last {last_loss:.6f} "
                     f"| train_mode={cfg.loss_mode_train}"
@@ -140,10 +141,10 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
                 if use_wandb:
                     wandb.log(
                         {
-                            "step": step,
                             "eval/test_last_rmse": float(test_rmse),
                             **rollout_metrics,
-                        }
+                        },
+                        step=step,
                     )
 
                 # save best-by-teacher-forcing checkpoint
@@ -184,5 +185,3 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
     finally:
         if use_wandb:
             wandb.finish()
-
-
