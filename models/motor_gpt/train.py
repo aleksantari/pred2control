@@ -12,6 +12,8 @@ import wandb
 
 
 
+
+
 @torch.no_grad()
 def eval_teacher_forced_last_rmse(model, episodes, L=150, num_batches=200, batch_size=128, device="cuda"):
     model.eval()
@@ -129,6 +131,7 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
                     model, test_eps, L=cfg.L, num_batches=200, batch_size=cfg.batch_size, device=cfg.device
                 )
                 print(f"== EVAL step {step:6d} | test_last_RMSE(norm) {test_rmse:.6f}")
+                model.train()
 
                 # rollout RMSE at multiple horizons (H-sweep)
                 rollout_metrics: Dict[str, float] = {}
@@ -136,6 +139,7 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
                     r = rollout_suffix_rmse_stage2(model, fixed_valset, H=H, device=cfg.device)
                     rollout_metrics[f"eval/rollout_suffix_rmse_h{H}"] = float(r)
                     print(f"== rollout_suffix_RMSE@H={H:<3d} {r:.6f}")
+                model.train()
 
                 # log eval metrics
                 if use_wandb:

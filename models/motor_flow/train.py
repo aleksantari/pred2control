@@ -87,7 +87,8 @@ def eval_motorflow_teacher_forced_rmse(model, episodes, cfg: FlowTrainConfig, nu
             err2 = ((samples - x0.unsqueeze(0)) ** 2).sum(dim=-1).min(dim=0).values  # (B,)
 
         sqerr_sum += err2.sum().item()
-        count += x0.shape[0] * x0.shape[1]
+        count += x0.numel()
+
 
     return (sqerr_sum / count) ** 0.5
 
@@ -211,6 +212,7 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
             clip_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
             opt.step()
 
+
             if step % 50 == 0:
                 print(f"step {step:6d} | train_vloss {loss.item():.6f}")
 
@@ -228,6 +230,7 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
             if step % cfg.eval_every == 0:
                 # teacher-forced RMSE (your existing eval)
                 test_rmse = eval_motorflow_teacher_forced_rmse(model, test_eps, cfg, num_batches=200)
+                model.train()
                 print(
                     f"== EVAL step {step:6d} | motorflow_test_RMSE(norm) {test_rmse:.6f} "
                     f"(K={cfg.K_eval}, n_steps={cfg.n_steps_sample_eval})"
@@ -245,6 +248,7 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
                         n_steps_sampler=cfg.n_steps_sample_eval,
                         device=cfg.device,
                     )
+                    model.train()
                     rollout_metrics[f"eval/rollout_mean_rmse_h{H}"] = float(mean_rmse)
                     rollout_metrics[f"eval/rollout_bestofM_rmse_h{H}"] = float(best_rmse)
                     print(f"== rollout_suffix_RMSE@H={H:<3d} mean {mean_rmse:.6f} | bestofM {best_rmse:.6f}")
