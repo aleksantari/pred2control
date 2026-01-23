@@ -174,7 +174,7 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
     fixed_valset = make_fixed_rollout_valset(test_eps, num_eps=16, L=cfg.L, H=max_H, seed=123)
 
     # horizons to evaluate (add 10 if you want)
-    rollout_Hs = [25, 50, 100]
+    rollout_Hs = [5, 10, 25, 50]
 
     # wandb logging cadence for training scalars
     log_every = getattr(cfg, "wandb_log_every", 10)  # default 10 if not in cfg
@@ -220,6 +220,7 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
             if use_wandb and (step % log_every == 0):
                 wandb.log(
                     {
+                        "step": step,
                         "train/vloss": float(loss.item()),
                         "grad/clip_norm": float(clip_norm),
                         "optim/lr": float(opt.param_groups[0]["lr"]),
@@ -257,6 +258,7 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
                 if use_wandb:
                     wandb.log(
                         {
+                            "step": step,
                             "eval/test_rmse": float(test_rmse),
                             **rollout_metrics,
                         },

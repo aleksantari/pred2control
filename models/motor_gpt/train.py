@@ -73,7 +73,7 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
     fixed_valset = make_fixed_rollout_valset(test_eps, num_eps=16, L=cfg.L, H=max_H, seed=123)
 
     # horizons to log (add 10 if you want)
-    rollout_Hs = [25, 50, 100]
+    rollout_Hs = [5, 10, 25, 50]
 
     # --- init W&B (minimal) ---
     use_wandb = (wandb is not None)
@@ -110,6 +110,7 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
             if use_wandb and (step % 10 == 0):
                 wandb.log(
                     {
+                        "step": step,
                         "train/loss": float(loss.item()),
                         "train/full_mse": float(full_loss),
                         "train/last_mse": float(last_loss),
@@ -145,6 +146,7 @@ def train_motorgpt(model, train_eps, test_eps, cfg: TrainConfig) -> Dict[str, fl
                 if use_wandb:
                     wandb.log(
                         {
+                            "step": step,
                             "eval/test_last_rmse": float(test_rmse),
                             **rollout_metrics,
                         },

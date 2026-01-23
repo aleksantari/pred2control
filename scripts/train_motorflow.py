@@ -18,9 +18,9 @@ def main():
 
     cfg = FlowTrainConfig(
         L = 150,
-        max_steps=10000,
+        max_steps=2000,
         batch_size=64,
-        eval_every=250,
+        eval_every=400,
         device="cuda" if torch.cuda.is_available() else "cpu",
     )
 

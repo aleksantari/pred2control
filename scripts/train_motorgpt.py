@@ -20,8 +20,8 @@ def main():
 
     cfg = TrainConfig(
         L=150,
-        loss_mode_train="full",
-        max_steps= 10000,
+        loss_mode_train="last",
+        max_steps= 2000,
         batch_size=64,
         eval_every=250,
         device="cuda" if torch.cuda.is_available() else "cpu"
