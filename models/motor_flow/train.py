@@ -1,3 +1,4 @@
+#train.py
 from dataclasses import dataclass
 import numpy as np
 import torch
@@ -40,23 +41,33 @@ class RectifiedFlowScheduler:
 
 
 @torch.no_grad()
-def sample_action(model, past_actions, n_steps=10):
-    # past_actions: (B,T,6) normalized
+def sample_action(model, past_actions, n_steps=25, eps=1e-3, method="heun"):
     B = past_actions.shape[0]
     device = past_actions.device
 
-    x = torch.randn(B, 6, device=device)  # start at noise (t=1)
+    x = torch.randn(B, 6, device=device)  # start at noise ~ t≈1
 
-    # time grid from 1 -> 0
-    ts = torch.linspace(1.0, 0.0, n_steps, device=device)
+    # time grid from (1-eps) -> eps, with more density near 0 if you want
+    s = torch.linspace(1.0, 0.0, n_steps, device=device)
+    s = s**2  # optional: densify near t≈0
+    ts = eps + (1 - 2*eps) * s  # in [eps, 1-eps]
 
     for i in range(n_steps - 1):
-        t = ts[i].repeat(B)               # (B,)
-        dt = ts[i+1] - ts[i]              # negative
-        v = model(a_noisy=x, t=t, past_actions=past_actions)  # (B,6)
-        x = x + dt * v                    # Euler step
+        t1 = ts[i].expand(B)
+        dt = ts[i + 1] - ts[i]  # negative
 
-    return x  # normalized action prediction (B,6)
+        v1 = model(a_noisy=x, t=t1, past_actions=past_actions)
+
+        if method == "euler":
+            x = x + dt * v1
+        else:  # Heun / improved Euler
+            x_euler = x + dt * v1
+            t2 = ts[i + 1].expand(B)
+            v2 = model(a_noisy=x_euler, t=t2, past_actions=past_actions)
+            x = x + dt * 0.5 * (v1 + v2)
+
+    return x
+
 
 
 

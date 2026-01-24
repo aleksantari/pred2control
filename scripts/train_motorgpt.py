@@ -20,7 +20,7 @@ def main():
 
     cfg = TrainConfig(
         L=150,
-        loss_mode_train="last",
+        loss_mode_train="full",
         max_steps= 2000,
         batch_size=64,
         eval_every=250,
