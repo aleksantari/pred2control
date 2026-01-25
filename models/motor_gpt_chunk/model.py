@@ -98,17 +98,17 @@ class Block(nn.Module):
         self.norm1 = nn.RMSNorm(embed_dim)
         self.norm2 = nn.RMSNorm(embed_dim)
         self.norm3 = nn.RMSNorm(embed_dim)
-        self.norm4 = nn.RMSNorm(embed_dim)
+
 
         self.self_attn = MultiHeadAttention(n_head, embed_dim, head_size, dropout)
         self.cross_attn = MultiHeadAttention(n_head, embed_dim, head_size, dropout)
         self.mlp = FeedForward(embed_dim, expansion=mlp_expansion, dropout=dropout)
 
-    def forward(self, t_cond, x, x_kv=None):
+    def forward(self, x, x_kv):
       
-        x = x + self.cross_attn(self.norm1(x), self.norm2(x_kv))
-        x = x + self.self_attn(self.norm3(x))
-        x = x + self.mlp(x) 
+        x = x + self.self_attn(self.norm1(x))
+        x = x + self.cross_attn(self.norm2(x), self.norm2(x_kv))
+        x = x + self.mlp(self.norm3(x)) 
         return x
     
 
@@ -118,7 +118,7 @@ class ContextBlock(nn.Module):
     A standard transformer encoder block for the context sequence only.
     No timestep conditioning is needed here (context is "past actions", not noisy).
     """
-    def __init__(self, embed_dim, n_head, mlp_expansion=4, dropout=0.0):
+    def __init__(self, embed_dim, n_head, mlp_expansion=2, dropout=0.0):
         super().__init__()
         assert embed_dim % n_head == 0
         head_dim = embed_dim // n_head
@@ -136,10 +136,7 @@ class ContextBlock(nn.Module):
 
 
 
-
-
 def init_weights(module: nn.Module):
-    # --- default linear/embedding/layernorm init ---
     if isinstance(module, nn.Linear):
         nn.init.normal_(module.weight, mean=0.0, std=0.02)
         if module.bias is not None:
@@ -152,90 +149,90 @@ def init_weights(module: nn.Module):
         nn.init.ones_(module.weight)
         nn.init.zeros_(module.bias)
 
-    # --- RMSNorm weights to 1 (PyTorch RMSNorm has weight only) ---
     if isinstance(module, nn.RMSNorm):
         if hasattr(module, "weight") and module.weight is not None:
             nn.init.ones_(module.weight)
 
-    # --- AdaRMSNorm: keep base weight=1; make conditioning start at "no effect" ---
+    # Optional: handle AdaRMSNorm by name if it exists in your codebase
     if module.__class__.__name__ == "AdaRMSNorm":
         if hasattr(module, "weight") and module.weight is not None:
             nn.init.ones_(module.weight)
+        if hasattr(module, "to_scale"):
+            last = module.to_scale[-1]
+            if isinstance(last, nn.Linear):
+                nn.init.zeros_(last.weight)
+                nn.init.zeros_(last.bias)
 
-        # last linear in to_scale -> zeros => scale(t) starts at 0
-        last = module.to_scale[-1]
-        if isinstance(last, nn.Linear):
-            nn.init.zeros_(last.weight)
-            nn.init.zeros_(last.bias)
-
-    # --- TimeMLP: last layer zeros so t-conditioning starts neutral ---
-    if isinstance(module, TimeMLP):
-        last = module.net[-1]
-        if isinstance(last, nn.Linear):
-            nn.init.zeros_(last.weight)
-            nn.init.zeros_(last.bias)
 
 
 class Motorgpt_chunk(nn.Module):
-    def __init__(self, embed_dim=128, n_layer=4, n_head=4, dropout=0.0, context_size=150, context_layers=2, context_mlp_expansion=4):
+    def __init__(self, embed_dim=128, n_layer=4, n_head=4, dropout=0.0,
+                 context_size=150, chunk_size=32, context_layers=2, context_mlp_expansion=4,
+                 learned_queries=True):
         super().__init__()
+
+        self.embed_dim = embed_dim
+        self.chunk_size = chunk_size
 
         self.action_in = nn.Linear(6, embed_dim)
         self.action_out = nn.Linear(embed_dim, 6)
 
-        self.context_pos_emb = nn.Embedding(traj_size, embed_dim)
-        self.time_embed = SinusoidalTimeEmbedding(time_dim)
-        self.time_mlp = TimeMLP(time_dim, embed_dim)
+        # pos emb for both sequences
+        self.pos_emb = nn.Embedding(context_size + chunk_size, embed_dim)
 
+        # optional learned query tokens (recommended for MotorGPT)
+        self.learned_queries = learned_queries
+        if learned_queries:
+            self.query_tok = nn.Parameter(torch.zeros(1, chunk_size, embed_dim))
 
+        # context encoder
         self.context_blocks = nn.ModuleList([
             ContextBlock(embed_dim, n_head, mlp_expansion=context_mlp_expansion, dropout=dropout)
             for _ in range(context_layers)
         ])
         self.context_norm = nn.RMSNorm(embed_dim)
 
-
+        # decoder blocks
         self.blocks = nn.ModuleList([
-            Block(embed_dim, n_head, embed_dim, dropout=dropout)
+            Block(embed_dim, n_head, dropout=dropout)
             for _ in range(n_layer)
         ])
-
         self.norm = nn.RMSNorm(embed_dim)
 
         self.apply(init_weights)
         nn.init.normal_(self.action_out.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.action_out.bias)
 
-    def forward(self, a_noisy: torch.Tensor, t: torch.Tensor, past_actions: torch.Tensor) -> torch.Tensor:
+    def forward(self, a_noisy_chunk: torch.Tensor, past_actions: torch.Tensor) -> torch.Tensor:
         """
-        a_noisy: (B, 6)
-        t: (B,)
-        past_actions: (B, T, 6)
+        a_noisy_chunk: (B, R, 6)   
+        past_actions:  (B, C, 6)
+        returns:       (B, R, 6)
         """
-        # time conditioning for the denoiser token
-        t_cond = self.time_mlp(self.time_embed(t))  # (B, D)
+        B, R, _ = a_noisy_chunk.shape
+        _, C, _ = past_actions.shape
 
-        # noisy token (query side)
-        x = self.action_in(a_noisy).unsqueeze(1)    # (B, 1, D)
+        # ----- encode context -----
+        ctx = self.action_in(past_actions)  # (B,C,D)
+        ctx_pos = self.pos_emb(torch.arange(C, device=past_actions.device)) # 0...C-1
+        ctx = ctx + ctx_pos
 
-        # raw context tokens (key/value side)
-        B, T, _ = past_actions.shape
-        pos = self.context_pos_emb(torch.arange(T, device=past_actions.device)).unsqueeze(0)  # (1,T,D)
-        context = self.action_in(past_actions) + pos  # (B,T,D)
-
-        # ✅ encode context with self-attention blocks
         for blk in self.context_blocks:
-            context = blk(context)
-        context = self.context_norm(context)
+            ctx = blk(ctx)
+        ctx = self.context_norm(ctx)
 
-        # denoise token with (self-attn + cross-attn into encoded context)
+        # ----- build query tokens -----
+        q = self.action_in(a_noisy_chunk)  # (B,R,D)
+        q_pos = self.pos_emb(torch.arange(C, C + R, device=past_actions.device)) # C..C+R-1
+        q = q + q_pos
+
+        if self.learned_queries:
+            q = q + self.query_tok[:, :R, :]
+
+        # ----- decode (denoise/predict) -----
         for blk in self.blocks:
-            x = blk(t_cond, x, context)
+            q = blk(q, ctx)
 
-        x = self.norm(x)             # (B,1,D)
-        x = self.action_out(x)       # (B,1,6)
-        return x.squeeze(1)          # (B,6)
-
-
-
-
+        q = self.norm(q)
+        out = self.action_out(q)  # (B,R,6)
+        return out
