@@ -42,83 +42,93 @@ class RectifiedFlowScheduler:
 
 
 @torch.no_grad()
-def sample_action(model, past_actions, n_steps=10, eps=1e-5, method="euler"):
+def sample_action(model, past_actions, chunk_size=30, n_steps=4, eps=1e-5, method="euler"):
+    """
+    Returns a sampled action chunk x0_hat: (B, R, 6)
+    """
     B = past_actions.shape[0]
     device = past_actions.device
+    R = chunk_size
 
-    x = torch.randn(B, 6, device=device)  # start at noise ~ t≈1
+    # start at noise ~ t≈1
+    x = torch.randn(B, R, 6, device=device)
 
-    # time grid from (1-eps) -> eps, 
+    # time grid from (1-eps) -> eps
     s = torch.linspace(1.0, 0.0, n_steps, device=device)
-
-    ts = eps + (1 - 2*eps) * s  # in [eps, 1-eps]
+    ts = eps + (1 - 2 * eps) * s  # in [eps, 1-eps]
 
     for i in range(n_steps - 1):
-        t1 = ts[i].expand(B)
-        dt = ts[i + 1] - ts[i]  # negative
+        tau1 = ts[i].expand(B)             # (B,)
+        dt = ts[i + 1] - ts[i]             # scalar, negative
 
-        v1 = model(a_noisy=x, t=t1, past_actions=past_actions)
+        v1 = model(past_actions=past_actions, noisy_actions=x, tau=tau1)  # (B,R,6)
 
         if method == "euler":
             x = x + dt * v1
-        if method == "huen":  
+
+        elif method == "huen":
             x_euler = x + dt * v1
-            t2 = ts[i + 1].expand(B)
-            v2 = model(a_noisy=x_euler, t=t2, past_actions=past_actions)
+            tau2 = ts[i + 1].expand(B)
+            v2 = model(past_actions=past_actions, noisy_actions=x_euler, tau=tau2)
             x = x + dt * 0.5 * (v1 + v2)
+
+        else:
+            raise ValueError(f"Unknown method: {method}")
 
     return x
 
 
 
-class RMSELoss(nn.Module):
-    def __init__(self, eps=1e-6):
-        super().__init__()
-        self.mse = nn.MSELoss()
-        self.eps = eps # Added epsilon for numerical stability
-
-    def forward(self, input, target):
-        # Calculate MSE and take the square root
-        loss = torch.sqrt(self.mse(input, target) + self.eps)
-        return loss
-
-
 
 @torch.no_grad()
-def eval_teacher_forced_rmse(model,
-                             episodes, 
-                             num_batches=200,
-                             batch_size=128,
-                             context_size=120, chunk_size=30, cfg: FlowTrainConfig):
+def eval_sampling_rmse(model,
+                       episodes,
+                       cfg: FlowTrainConfig,
+                       num_batches=200,
+                       batch_size=128):
     """
-    Teacher-forced next-action eval:
-    sample x_hat given past_actions, compare to x0.
+    Sampling eval:
+    sample x_hat via Euler/Heun given past_actions, compare to x0.
     If K_eval>1, report best-of-K (oracle) RMSE.
     """
+    C = cfg.context_size
+    R = cfg.chunk_size
+    device = cfg.device
+    K = cfg.K_eval
+    n_steps = cfg.flow_steps
+    method = cfg.method
+
     model.eval()
-    sqerr_sum = 0.0
+    loss_sum = 0.0
     count = 0
 
     for _ in range(num_batches):
-        x0, past = sample_batch_motorflow(episodes, batch_size=cfg.batch_size, L=cfg.L)
-        x0 = x0.to(cfg.device)
-        past = past.to(cfg.device)
+        chunk, context = sample_batch_motorflow_chunk(
+            episodes, batch_size=batch_size, context_size=C, chunk_size=R
+        )
+        x0 = chunk.to(device)
+        context = context.to(device)
 
-        if cfg.K_eval == 1:
-            x_hat = sample_action(model, past, n_steps=cfg.n_steps_sample_eval)
-            err2 = ((x_hat - x0) ** 2).sum(dim=-1)  # (B,)
+        if K == 1:
+            pred = sample_action(model, past_actions=context, chunk_size=R, n_steps=n_steps, method=method)
+            mse = (pred - x0).pow(2).mean(dim=(1, 2))                 # (B,)
+            rmse = torch.sqrt(mse + 1e-6).mean().item()              # scalar
+            loss_sum += rmse
         else:
-            samples = [sample_action(model, past, n_steps=cfg.n_steps_sample_eval) for _ in range(cfg.K_eval)]
-            samples = torch.stack(samples, dim=0)  # (K,B,6)
-            err2 = ((samples - x0.unsqueeze(0)) ** 2).sum(dim=-1).min(dim=0).values  # (B,)
+            preds = torch.stack(
+                [sample_action(model, past_actions=context, chunk_size=R, n_steps=n_steps, method=method)
+                 for _ in range(K)],
+                dim=0
+            )  # (K,B,R,6)
 
-        sqerr_sum += err2.sum().item()
-        count += x0.numel()
+            mse_kb = (preds - x0.unsqueeze(0)).pow(2).mean(dim=(2, 3))   # (K,B)
+            rmse_kb = torch.sqrt(mse_kb + 1e-6)                          # (K,B)
+            best_rmse = rmse_kb.min(dim=0).values.mean().item()          # scalar
+            loss_sum += best_rmse
 
+        count += 1
 
-    return (sqerr_sum / count) ** 0.5
-
-
+    return loss_sum / count
 
 
 
@@ -134,9 +144,12 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
 
     max_steps = cfg.max_steps
     eval_step = cfg.eval_every
+    K = cfg.K_eval
+    flow_steps = cfg.flow_steps
 
     seed  = cfg.seed
     device = cfg.device
+    clip = cfg.grad_clip
 
 
     set_seed(seed)
@@ -169,9 +182,9 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
             context = context.to(cfg.device)
             x0 = chunk.to(cfg.device)
 
-            tau = scheduler.sample_t(B, device=device)
-            z = scheduler.sample_noise(B, device=device)
-            xt = scheduler.bridge(x0, z, tau)
+            tau = scheduler.sample_t(B, device=device)             # (B,)
+            z = scheduler.sample_noise((B, R, 6), device=device)   # (B,R,6)
+            xt  = scheduler.bridge(x0, z, tau)                     # (B,R,6)
 
             v_target = scheduler.target_velocity(x0, z)
             v_pred = model(past_actions=context, noisy_actions=xt, tau=tau)
@@ -180,7 +193,7 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            clip_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            clip_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), clip)
             opt.step()
 
 
@@ -201,20 +214,12 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
 
             if step % eval_step == 0:
                 # teacher-forced RMSE (your existing eval)
-                test_rmse = eval_motorflow_teacher_forced_rmse(model, test_eps, cfg, num_batches=200)
+                test_rmse = eval_sampling_rmse(model, test_eps, cfg, num_batches=200, batch_size=128)
                 model.train()
                 print(
-                    f"== EVAL step {step:6d} | motorflow_test_RMSE(norm) {test_rmse:.6f} "
-                    f"(K={cfg.K_eval}, n_steps={cfg.n_steps_sample_eval})"
+                    f"== EVAL step {step:6d} | motorflow_test_RMSE {test_rmse:.6f} "
+                    f"(K={K}, flow_steps={flow_steps})"
                 )
-
-                # rollout eval at multiple horizons
-                rollout_metrics = {}
-             
-                    model.train()
-                    rollout_metrics[f"eval/rollout_mean_rmse_h{H}"] = float(mean_rmse)
-                    rollout_metrics[f"eval/rollout_bestofM_rmse_h{H}"] = float(best_rmse)
-                    print(f"== rollout_suffix_RMSE@H={H:<3d} mean {mean_rmse:.6f} | bestofM {best_rmse:.6f}")
 
                 # log eval metrics (use real step)
                 if use_wandb:
@@ -222,7 +227,6 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
                         {
                             "step": step,
                             "eval/test_rmse": float(test_rmse),
-                            **rollout_metrics,
                         },
                         step=step,
                     )
@@ -231,31 +235,13 @@ def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
                 if test_rmse < best_test_rmse:
                     best_test_rmse = test_rmse
                     ckpt = {"model_state": model.state_dict(), "config": cfg.__dict__, "best_test_rmse": best_test_rmse}
-                    torch.save(ckpt, "motor_flow_best.pt")
-                    print(f"   saved: motor_flow_best.pt (best_test_rmse={best_test_rmse:.6f})")
+                    torch.save(ckpt, "motor_flow_chunk_best.pt")
+                    print(f"   saved: motor_flow_chunk_best.pt (best_test_rmse={best_test_rmse:.6f})")
                     if use_wandb:
-                        wandb.save("motor_flow_best.pt")
-
-                # save best-by-rollout checkpoint (use best-of-M at H=100 as primary)
-                bestof_h100 = rollout_metrics.get("eval/rollout_bestofM_rmse_h100", None)
-                if bestof_h100 is not None and bestof_h100 < best_rollout_bestofM_h100:
-                    best_rollout_bestofM_h100 = bestof_h100
-                    ckpt = {
-                        "model_state": model.state_dict(),
-                        "config": cfg.__dict__,
-                        "best_rollout_bestofM_rmse_h100": best_rollout_bestofM_h100,
-                    }
-                    torch.save(ckpt, "motor_flow_best_rollout.pt")
-                    print(
-                        f"   saved: motor_flow_best_rollout.pt "
-                        f"(best_rollout_bestofM_rmse_h100={best_rollout_bestofM_h100:.6f})"
-                    )
-                    if use_wandb:
-                        wandb.save("motor_flow_best_rollout.pt")
+                        wandb.save("motor_flow_chunk_best.pt")
 
         return {
             "best_test_rmse": best_test_rmse,
-            "best_rollout_bestofM_rmse_h100": best_rollout_bestofM_h100,
         }
 
     finally:

@@ -1,3 +1,4 @@
+#config.py
 from dataclasses import dataclass
 import torch
 import numpy as np
@@ -31,5 +32,6 @@ class FlowTrainConfig:
     seed: int = 67
 
     # eval/sampling
-    n_steps_sample_eval: int = 10
+    flow_steps: int = 4
     K_eval: int = 10
+    method: str = "euler"
