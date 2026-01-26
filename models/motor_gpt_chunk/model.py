@@ -1,3 +1,4 @@
+#model.py
 import torch
 import torch.nn as nn 
 import torch.nn.functional as F
@@ -167,8 +168,7 @@ def init_weights(module: nn.Module):
 
 class Motorgpt_chunk(nn.Module):
     def __init__(self, embed_dim=128, n_layer=4, n_head=4, dropout=0.0,
-                 context_size=150, chunk_size=32, context_layers=2, context_mlp_expansion=4,
-                 learned_queries=True):
+                 context_size=150, chunk_size=30, context_layers=2, context_mlp_expansion=4):
         super().__init__()
 
         self.embed_dim = embed_dim
@@ -180,10 +180,7 @@ class Motorgpt_chunk(nn.Module):
         # pos emb for both sequences
         self.pos_emb = nn.Embedding(context_size + chunk_size, embed_dim)
 
-        # optional learned query tokens (recommended for MotorGPT)
-        self.learned_queries = learned_queries
-        if learned_queries:
-            self.query_tok = nn.Parameter(torch.zeros(1, chunk_size, embed_dim))
+        self.query_tok = nn.Parameter(torch.zeros(1, chunk_size, embed_dim))
 
         # context encoder
         self.context_blocks = nn.ModuleList([
@@ -203,18 +200,20 @@ class Motorgpt_chunk(nn.Module):
         nn.init.normal_(self.action_out.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.action_out.bias)
 
-    def forward(self, a_noisy_chunk: torch.Tensor, past_actions: torch.Tensor) -> torch.Tensor:
+    def forward(self, past_actions: torch.Tensor) -> torch.Tensor:
         """
-        a_noisy_chunk: (B, R, 6)   
-        past_actions:  (B, C, 6)
-        returns:       (B, R, 6)
+        past_actions: (B, C, 6)
+        returns:      (B, R, 6)
         """
-        B, R, _ = a_noisy_chunk.shape
-        _, C, _ = past_actions.shape
+        R = self.chunk_size
+
+        B, C, _ = past_actions.shape
+        assert R <= self.chunk_size, f"R={R} > model chunk_size={self.chunk_size}"
+        assert (C + R) <= self.pos_emb.num_embeddings, "pos_emb too small for C+R"
 
         # ----- encode context -----
         ctx = self.action_in(past_actions)  # (B,C,D)
-        ctx_pos = self.pos_emb(torch.arange(C, device=past_actions.device)) # 0...C-1
+        ctx_pos = self.pos_emb(torch.arange(C, device=past_actions.device)).unsqueeze(0)  # (1,C,D)
         ctx = ctx + ctx_pos
 
         for blk in self.context_blocks:
@@ -222,14 +221,10 @@ class Motorgpt_chunk(nn.Module):
         ctx = self.context_norm(ctx)
 
         # ----- build query tokens -----
-        q = self.action_in(a_noisy_chunk)  # (B,R,D)
-        q_pos = self.pos_emb(torch.arange(C, C + R, device=past_actions.device)) # C..C+R-1
-        q = q + q_pos
+        q_pos = self.pos_emb(torch.arange(C, C + R, device=past_actions.device)).unsqueeze(0)  # (1,R,D)
+        q = self.query_tok[:, :R, :].expand(B, -1, -1) + q_pos  # (B,R,D)
 
-        if self.learned_queries:
-            q = q + self.query_tok[:, :R, :]
-
-        # ----- decode (denoise/predict) -----
+        # ----- decode -----
         for blk in self.blocks:
             q = blk(q, ctx)
 

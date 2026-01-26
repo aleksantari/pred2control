@@ -1,8 +1,9 @@
+#data.py
 import numpy as np
 import torch
 
 
-def sample_batch_motorgpt_chunk(episodes, batch_size, context_size=120, chunk_size=30, device=None):
+def sample_batch_motorgpt_chunk(episodes, batch_size, context_size=120, chunk_size=30):
     """
     episodes: list of torch.Tensor, each (T_i, 6) float32 (already normalized)
     returns:
@@ -13,8 +14,8 @@ def sample_batch_motorgpt_chunk(episodes, batch_size, context_size=120, chunk_si
     C = context_size
     R = chunk_size
 
-    past  = torch.empty(B, C, 6, dtype=torch.float32, device=device)
-    chunk = torch.empty(B, R, 6, dtype=torch.float32, device=device)
+    context  = torch.empty(B, C, 6, dtype=torch.float32)
+    chunk = torch.empty(B, R, 6, dtype=torch.float32)
 
     for b in range(B):
         ep = episodes[np.random.randint(0, len(episodes))] # sample an episode from list
@@ -27,6 +28,6 @@ def sample_batch_motorgpt_chunk(episodes, batch_size, context_size=120, chunk_si
         s = np.random.randint(0, max_s + 1) # sample a random start within valid window
 
         window = ep[s : s + C + R]  # (C+R, 6)
-        past[b]  = window[:C]
+        context[b]  = window[:C]
         chunk[b] = window[C:]
-    return chunk, past
+    return chunk, context
