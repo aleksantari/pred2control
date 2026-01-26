@@ -32,6 +32,6 @@ class FlowTrainConfig:
     seed: int = 67
 
     # eval/sampling
-    flow_steps: int = 4
-    K_eval: int = 10
+    flow_steps: int = 10
+    K_eval: int = 4
     method: str = "euler"

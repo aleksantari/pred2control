@@ -42,7 +42,7 @@ class RectifiedFlowScheduler:
 
 
 @torch.no_grad()
-def sample_action(model, past_actions, chunk_size=30, n_steps=4, eps=1e-5, method="euler"):
+def sample_action(model, past_actions, chunk_size=30, n_steps=10, eps=1e-5, method="euler"):
     """
     Returns a sampled action chunk x0_hat: (B, R, 6)
     """
@@ -133,7 +133,7 @@ def eval_sampling_rmse(model,
 
 
 
-def train_motorflow(model, train_eps, test_eps, cfg: FlowTrainConfig):
+def train_motorflow_chunk(model, train_eps, test_eps, cfg: FlowTrainConfig):
 
     C = cfg.context_size
     R = cfg.chunk_size
