@@ -256,7 +256,7 @@ class MotorFlow_chunk(nn.Module):
 
         # tau embedding
         self.tau_embed = SinusoidalTimeEmbedding(tau_dim)
-        self.tau_mlp = TimeMLP(tau_dim, embed_dim)
+        self.tau_mlp = TimeMLP(tau_dim, tau_dim)
 
         # context encoder
         self.context_blocks = nn.ModuleList([
@@ -276,10 +276,11 @@ class MotorFlow_chunk(nn.Module):
         nn.init.normal_(self.action_out.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.action_out.bias)
 
-    def forward(self, past_actions: torch.Tensor, noisy_actions: torch.Tensor, tau: int ) -> torch.Tensor:
+    def forward(self, past_actions: torch.Tensor, noisy_actions: torch.Tensor, tau: torch.Tensor) -> torch.Tensor:
         """
         past_actions: (B, C, 6)
         noisey_actions: (B, R, 6)
+        tau: (B,) float tensor in [0,1]
         returns:      (B, R, 6)
         """
         R = self.chunk_size
@@ -303,6 +304,7 @@ class MotorFlow_chunk(nn.Module):
         q = q + q_pos  # (B,R,D)
 
         # tau embeddings
+        tau = tau.to(past_actions.device).float()
         tau = self.tau_mlp(self.tau_embed(tau))
 
         # ----- decode -----
@@ -312,3 +314,5 @@ class MotorFlow_chunk(nn.Module):
         q = self.norm(q)
         out = self.action_out(q)  # (B,R,6)
         return out
+
+
