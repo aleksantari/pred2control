@@ -1,9 +1,9 @@
+#model.py
 import torch
 import torch.nn as nn 
 import torch.nn.functional as F
 import math
 import numpy as np
-
 
 
 class SinusoidalTimeEmbedding(nn.Module):
@@ -62,7 +62,7 @@ class AdaRMSNorm(nn.Module):
         x_norm = x / rms
         scale = self.to_scale(cond).unsqueeze(1)  # (B, 1, D)
         return x_norm * (self.weight + scale)
-    
+
 
 
 
@@ -152,25 +152,26 @@ class FeedForward(nn.Module):
 
 # Transformer Block with Self-Attention, Cross-Attention, and Feed-Forward Network
 class Block(nn.Module):
-    def __init__(self, embed_dim, n_head, t_cond, mlp_expansion=4, dropout=0.0):
+    def __init__(self, embed_dim, tau_dim, n_head, mlp_expansion=4, dropout=0.0):
         super().__init__()
         assert embed_dim % n_head == 0
         head_size = embed_dim // n_head
 
-        self.ada_norm1 = AdaRMSNorm(embed_dim, t_cond)
-        self.ada_norm2 = AdaRMSNorm(embed_dim, t_cond)
-        self.ada_norm3 = AdaRMSNorm(embed_dim, t_cond)
+        self.ada_norm1 = AdaRMSNorm(embed_dim, tau_dim)
+        self.ada_norm2 = AdaRMSNorm(embed_dim, tau_dim)
+        self.ada_norm3 = AdaRMSNorm(embed_dim, tau_dim)
         self.rms_norm = nn.RMSNorm(embed_dim)
+
 
         self.self_attn = MultiHeadAttention(n_head, embed_dim, head_size, dropout)
         self.cross_attn = MultiHeadAttention(n_head, embed_dim, head_size, dropout)
         self.mlp = FeedForward(embed_dim, expansion=mlp_expansion, dropout=dropout)
 
-    def forward(self, t_cond, x, x_kv=None):
+    def forward(self, x, x_kv, tau):
       
-        x = x + self.self_attn(self.ada_norm1(x, t_cond))
-        x = x + self.cross_attn(self.ada_norm2(x, t_cond), self.rms_norm(x_kv))
-        x = x + self.mlp(self.ada_norm3(x, t_cond))
+        x = x + self.self_attn(self.ada_norm1(x, tau))
+        x = x + self.cross_attn(self.ada_norm2(x, tau), self.rms_norm(x_kv))
+        x = x + self.mlp(self.ada_norm3(x, tau)) 
         return x
     
 
@@ -180,7 +181,7 @@ class ContextBlock(nn.Module):
     A standard transformer encoder block for the context sequence only.
     No timestep conditioning is needed here (context is "past actions", not noisy).
     """
-    def __init__(self, embed_dim, n_head, mlp_expansion=4, dropout=0.0):
+    def __init__(self, embed_dim, n_head, mlp_expansion=2, dropout=0.0):
         super().__init__()
         assert embed_dim % n_head == 0
         head_dim = embed_dim // n_head
@@ -195,8 +196,6 @@ class ContextBlock(nn.Module):
         x = x + self.attn(self.norm1(x))
         x = x + self.mlp(self.norm2(x))
         return x
-
-
 
 
 
@@ -237,75 +236,79 @@ def init_weights(module: nn.Module):
             nn.init.zeros_(last.weight)
             nn.init.zeros_(last.bias)
 
-    # --- OPTIONAL BUT RECOMMENDED: small output head for flow ---
-    # If you want this, name your layers exactly: action_out / action_in
-    # (works because apply() visits submodules; we can detect by attribute name only if we do it in MotorFlow)
 
 
-
-class MotorFlow(nn.Module):
-    def __init__(self, embed_dim=192, time_dim=64, 
-                 n_layer=4, n_head=4, dropout=0.0, 
-                 traj_size=150, context_layers=2, context_mlp_expansion=4):
+class MotorFlow_chunk(nn.Module):
+    def __init__(self, embed_dim=128, tau_dim=64, 
+                 n_layer=4, n_head=4, dropout=0.0,
+                 context_size=150, chunk_size=30, 
+                 context_layers=2):
         super().__init__()
+
+        self.embed_dim = embed_dim
+        self.chunk_size = chunk_size
 
         self.action_in = nn.Linear(6, embed_dim)
         self.action_out = nn.Linear(embed_dim, 6)
 
-        self.context_pos_emb = nn.Embedding(traj_size, embed_dim)
-        
-        self.time_embed = SinusoidalTimeEmbedding(time_dim)
-        self.time_mlp = TimeMLP(time_dim, embed_dim)
+        # pos emb for both sequences
+        self.pos_emb = nn.Embedding(context_size + chunk_size, embed_dim)
 
+        # tau embedding
+        self.tau_embed = SinusoidalTimeEmbedding(tau_dim)
+        self.tau_mlp = TimeMLP(tau_dim, embed_dim)
 
+        # context encoder
         self.context_blocks = nn.ModuleList([
-            ContextBlock(embed_dim, n_head, mlp_expansion=context_mlp_expansion, dropout=dropout)
+            ContextBlock(embed_dim, n_head, dropout=dropout)
             for _ in range(context_layers)
         ])
         self.context_norm = nn.RMSNorm(embed_dim)
 
-
+        # decoder blocks
         self.blocks = nn.ModuleList([
-            Block(embed_dim, n_head, embed_dim, dropout=dropout)
+            Block(embed_dim, tau_dim, n_head, dropout=dropout)
             for _ in range(n_layer)
         ])
-
         self.norm = nn.RMSNorm(embed_dim)
 
         self.apply(init_weights)
         nn.init.normal_(self.action_out.weight, mean=0.0, std=1e-3)
         nn.init.zeros_(self.action_out.bias)
 
-    def forward(self, a_noisy: torch.Tensor, t: torch.Tensor, past_actions: torch.Tensor) -> torch.Tensor:
+    def forward(self, past_actions: torch.Tensor, noisy_actions: torch.Tensor, tau: int ) -> torch.Tensor:
         """
-        a_noisy: (B, 6)
-        t: (B,)
-        past_actions: (B, T, 6)
+        past_actions: (B, C, 6)
+        noisey_actions: (B, R, 6)
+        returns:      (B, R, 6)
         """
-        # time conditioning for the denoiser token
-        t_cond = self.time_mlp(self.time_embed(t))  # (B, D)
+        R = self.chunk_size
 
-        # noisy token (query side)
-        x = self.action_in(a_noisy).unsqueeze(1)    # (B, 1, D)
+        B, C, _ = past_actions.shape
+        assert R <= self.chunk_size, f"R={R} > model chunk_size={self.chunk_size}"
+        assert (C + R) <= self.pos_emb.num_embeddings, "pos_emb too small for C+R"
 
-        # raw context tokens (key/value side)
-        B, T, _ = past_actions.shape
-        pos = self.context_pos_emb(torch.arange(T, device=past_actions.device)).unsqueeze(0)  # (1,T,D)
-        context = self.action_in(past_actions) + pos  # (B,T,D)
+        # ----- encode context -----
+        ctx = self.action_in(past_actions)  # (B,C,D)
+        ctx_pos = self.pos_emb(torch.arange(C, device=past_actions.device)).unsqueeze(0)  # (1,C,D)
+        ctx = ctx + ctx_pos
 
-        # ✅ encode context with self-attention blocks
         for blk in self.context_blocks:
-            context = blk(context)
-        context = self.context_norm(context)
+            ctx = blk(ctx)
+        ctx = self.context_norm(ctx)
 
-        # denoise token with (self-attn + cross-attn into encoded context)
+        # ----- build query tokens -----
+        q_pos = self.pos_emb(torch.arange(C, C + R, device=past_actions.device)).unsqueeze(0)  # (1,R,D)
+        q = self.action_in(noisy_actions)
+        q = q + q_pos  # (B,R,D)
+
+        # tau embeddings
+        tau = self.tau_mlp(self.tau_embed(tau))
+
+        # ----- decode -----
         for blk in self.blocks:
-            x = blk(t_cond, x, context)
+            q = blk(q, ctx, tau)
 
-        x = self.norm(x)             # (B,1,D)
-        x = self.action_out(x)       # (B,1,6)
-        return x.squeeze(1)          # (B,6)
-
-
-
-
+        q = self.norm(q)
+        out = self.action_out(q)  # (B,R,6)
+        return out
