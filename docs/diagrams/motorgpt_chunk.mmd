@@ -1,0 +1,30 @@
+flowchart LR
+  %% =========================
+  %% MotorGPT_chunk (deterministic chunk regression)
+  %% =========================
+
+  subgraph IN[Inputs]
+    A[Past actions\npast_actions ∈ R^{B×C×6}]
+  end
+
+  subgraph SHARED[Shared design: Context Encoder]
+    A --> AI[action_in: Linear 6→D]
+    AI --> CP[+ pos_emb(0..C-1)]
+    CP --> CB[ContextBlocks × L_ctx\n(RMSNorm → SelfAttn → MLP)]
+    CB --> CN[context_norm: RMSNorm]
+    CN --> CTX[Context tokens\nctx ∈ R^{B×C×D}]
+  end
+
+  subgraph HEAD[MotorGPT chunk head: learned query tokens]
+    QT[query_tok: learned params\n∈ R^{1×R×D}] --> QEXP[expand to B×R×D]
+    QEXP --> QP[+ pos_emb(C..C+R-1)]
+    QP --> Q[Query tokens\nq ∈ R^{B×R×D}]
+  end
+
+  subgraph DEC[Decoder: same block pattern across models]
+    Q --> BLK[Decoder Blocks × L_dec\n(SelfAttn → CrossAttn(ctx) → MLP)\nRMSNorm in each sublayer]
+    CTX --> BLK
+    BLK --> N[norm: RMSNorm]
+    N --> AO[action_out: Linear D→6]
+    AO --> OUT[Predicted action chunk\nâ_{t:t+R-1} ∈ R^{B×R×6}]
+  end

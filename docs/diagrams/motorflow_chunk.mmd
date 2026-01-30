@@ -1,0 +1,39 @@
+flowchart LR
+  %% =========================
+  %% MotorFlow_chunk (flow-matching velocity field on chunks)
+  %% =========================
+
+  subgraph IN[Inputs]
+    A[Past actions\npast_actions ∈ R^{B×C×6}]
+    NA[Noisy actions\nnoisy_actions ∈ R^{B×R×6}]
+    TAU[tau ∈ [0,1]\n(tau ∈ R^{B})]
+  end
+
+  subgraph SHARED[Shared design: Context Encoder]
+    A --> AI[action_in: Linear 6→D]
+    AI --> CP[+ pos_emb(0..C-1)]
+    CP --> CB[ContextBlocks × L_ctx\n(RMSNorm → SelfAttn → MLP)]
+    CB --> CN[context_norm: RMSNorm]
+    CN --> CTX[Context tokens\nctx ∈ R^{B×C×D}]
+  end
+
+  subgraph DIFFQ[Key difference: query tokens are *data* (noisy chunk)]
+    NA --> NAI[action_in: Linear 6→D]
+    NAI --> QP[+ pos_emb(C..C+R-1)]
+    QP --> Q[Query tokens (noisy)\nq ∈ R^{B×R×D}]
+  end
+
+  subgraph TAUEMB[Key difference: τ-conditioning]
+    TAU --> SE[SinusoidalTimeEmbedding τ→τ_dim]
+    SE --> TM[TimeMLP τ_dim→τ_dim]
+    TM --> TCOND[τ_cond ∈ R^{B×τ_dim}]
+  end
+
+  subgraph DEC[Decoder: same block topology, τ changes the normalization]
+    Q --> BLK[Decoder Blocks × L_dec\n(SelfAttn → CrossAttn(ctx) → MLP)\n**AdaRMSNorm(x, τ_cond)** in each sublayer]
+    CTX --> BLK
+    TCOND --> BLK
+    BLK --> N[norm: RMSNorm]
+    N --> AO[action_out: Linear D→6]
+    AO --> OUT[Predicted velocity field on chunk\nv̂ ∈ R^{B×R×6}]
+  end
